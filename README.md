@@ -1,6 +1,9 @@
 
+
+
 ```
 pulumi config set gcp:region
 pulumi config set gcp:project
-
-```# cloudrun_services_to_services
+gcloud auth configure-docker \
+    us-central1-docker.pkg.dev
+```
