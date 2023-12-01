@@ -30,7 +30,7 @@ repo = gcp.artifactregistry.Repository(
     repository_id=repository_id
 )
 
-myapp = docker.Image("myapp",
+cloudrun_image = docker.Image("cloudrun-image",
     image_name=image_name,
     build=docker.DockerBuildArgs(
         args={
@@ -52,7 +52,7 @@ service_account = gcp.serviceaccount.Account("serviceAccount",
 
 
 # create custom vpc with pga
-internal_network_with_pga = gcp.compute.Network("internal-vpc",
+internal_network= gcp.compute.Network("internal-vpc",
     auto_create_subnetworks=False,
     description="internal vpc with pga",
     mtu=1500
@@ -60,32 +60,34 @@ internal_network_with_pga = gcp.compute.Network("internal-vpc",
 
 
 # create custom vpc subnet with pga
-subnetwork_with_pga = gcp.compute.Subnetwork("demo-subnet",
+subnetwork = gcp.compute.Subnetwork("demo-subnet",
     ip_cidr_range="10.0.1.0/24",
     region=gcp_region,
-    network=internal_network_with_pga.id,
+    network=internal_network.id,
     private_ip_google_access=True
 )
 
 
-
 # create vpc access connector in  internal connector
-connector_with_pga = gcp.vpcaccess.Connector("run-connector",
+vpc_connector = gcp.vpcaccess.Connector("vpc-connector",
     ip_cidr_range="10.1.0.0/28",
-    network=internal_network_with_pga.id,
+    network=internal_network.id,
     opts=pulumi.ResourceOptions(
-        depends_on=[internal_network_with_pga]
+        depends_on=[internal_network]
     )
 )
 
 # create downstream cloud run service
-internal_cloudrun = gcp.cloudrunv2.Service("downstream-cloudrun",
+downstream_cloudrun = gcp.cloudrunv2.Service(
+    "downstream-cloudrun",
     location=gcp_region,
     ingress="INGRESS_TRAFFIC_INTERNAL_ONLY",
     template=gcp.cloudrunv2.ServiceTemplateArgs(
-        containers=[gcp.cloudrunv2.ServiceTemplateContainerArgs(
-            image="us-docker.pkg.dev/cloudrun/container/hello"
-        )],
+        containers=[
+            gcp.cloudrunv2.ServiceTemplateContainerArgs(
+                image="us-docker.pkg.dev/cloudrun/container/hello"
+            )
+        ],
         scaling=gcp.cloudrunv2.ServiceTemplateScalingArgs(
                 max_instance_count=1,
                 min_instance_count=0
@@ -95,16 +97,19 @@ internal_cloudrun = gcp.cloudrunv2.Service("downstream-cloudrun",
         timeout="3600s",
         session_affinity=True,
     ),
-    traffics=[gcp.cloudrunv2.ServiceTrafficArgs(
-        type="TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST",
-        percent=100,
-    )],
+    traffics=[
+        gcp.cloudrunv2.ServiceTrafficArgs(
+            type="TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST",
+            percent=100,
+        )
+    ],
     opts=pulumi.ResourceOptions(depends_on=[])
-    )
+)
 
 
 # create cloud run service with pga
-external_cloudrun_1 = gcp.cloudrunv2.Service("cloudrun-with-pga",
+service_use_pga = gcp.cloudrunv2.Service(
+    "cloudrun-with-pga",
     location=gcp_region,
     ingress="INGRESS_TRAFFIC_ALL",
     template=gcp.cloudrunv2.ServiceTemplateArgs(
@@ -113,7 +118,7 @@ external_cloudrun_1 = gcp.cloudrunv2.Service("cloudrun-with-pga",
             envs=[
                 gcp.cloudrunv2.ServiceTemplateContainerEnvArgs(
                     name="endpoint",
-                    value=internal_cloudrun.uri,
+                    value=downstream_cloudrun.uri,
                 )
             ],
             ports=[gcp.cloudrunv2.ServiceTemplateContainerPortArgs(
@@ -121,7 +126,7 @@ external_cloudrun_1 = gcp.cloudrunv2.Service("cloudrun-with-pga",
             )]
         )],
         vpc_access=gcp.cloudrunv2.ServiceTemplateVpcAccessArgs(
-            connector=connector_with_pga.id,
+            connector=vpc_connector.id,
             egress="ALL_TRAFFIC",
         ),
         scaling=gcp.cloudrunv2.ServiceTemplateScalingArgs(
@@ -142,14 +147,16 @@ external_cloudrun_1 = gcp.cloudrunv2.Service("cloudrun-with-pga",
 
 
 
-service_iam_member = gcp.cloudrunv2.ServiceIamMember("service-iam-member",
-    name=internal_cloudrun.id,
+downstream_iam = gcp.cloudrunv2.ServiceIamMember(
+    "downstream-iam",
+    name=downstream_cloudrun.id,
     role="roles/run.invoker",
     member="allUsers"
 )
 
-service_iam_member2 = gcp.cloudrunv2.ServiceIamMember("service-iam-member2",
-    name=external_cloudrun_1.id,
+service_use_pga_iam = gcp.cloudrunv2.ServiceIamMember(
+    "service-pga-iam",
+    name=service_use_pga.id,
     role="roles/run.invoker",
     member="allUsers"
 )
@@ -157,38 +164,40 @@ service_iam_member2 = gcp.cloudrunv2.ServiceIamMember("service-iam-member2",
 
 
 # Case 2
-cloudrun_neg_region_network_endpoint_group = gcp.compute.RegionNetworkEndpointGroup("internalneg",
+serverless_neg = gcp.compute.RegionNetworkEndpointGroup(
+    "internalneg",
     network_endpoint_type="SERVERLESS",
     region=gcp_region,
     cloud_run=gcp.compute.RegionNetworkEndpointGroupCloudRunArgs(
-        service=internal_cloudrun.name,
+        service=downstream_cloudrun.name,
     )
 )
 
-serverless_neg = gcp.compute.RegionBackendService(
+loadbalancer_backend = gcp.compute.RegionBackendService(
     "serverlessneg",
     load_balancing_scheme="INTERNAL_MANAGED",
     protocol="HTTP2",
     region=gcp_region,
     backends=[gcp.compute.RegionBackendServiceBackendArgs(
-        group=cloudrun_neg_region_network_endpoint_group.self_link,
+        group=serverless_neg.self_link,
         balancing_mode="UTILIZATION"
     )]
 )
 
 # create custom vpc subnet with proxy
-proxy_subnetwork = gcp.compute.Subnetwork("proxy-subnet",
+proxy_subnetwork = gcp.compute.Subnetwork(
+    "proxy-subnet",
     ip_cidr_range="10.0.201.0/24",
     region=gcp_region,
     purpose="REGIONAL_MANAGED_PROXY",
     role="ACTIVE",
-    network=internal_network_with_pga.id
+    network=internal_network.id
 )
 
 # Create a URL map
 url_map = gcp.compute.RegionUrlMap(
     'internallb-url-map',
-    default_service=serverless_neg.self_link
+    default_service=loadbalancer_backend.self_link
 )
 
 # Create a Target HTTP Proxy
@@ -202,19 +211,19 @@ target_http_proxy = gcp.compute.RegionTargetHttpProxy(
 addr = gcp.compute.Address(
     "addr", 
     region=gcp_region,
-    subnetwork=subnetwork_with_pga.id,
+    subnetwork=subnetwork.id,
     address_type="INTERNAL"
 )
 
 # Lastly, create a global Forwarding Rule
-global_forwarding_rule = gcp.compute.ForwardingRule(
+forwarding_rule = gcp.compute.ForwardingRule(
     'internal-forwardingrule',
     target=target_http_proxy.self_link,
     port_range='80',
     load_balancing_scheme="INTERNAL_MANAGED",
     ip_address=addr.self_link,
-    network=internal_network_with_pga,
-    subnetwork=subnetwork_with_pga
+    network=internal_network,
+    subnetwork=subnetwork
 )
 
 
@@ -236,7 +245,7 @@ external_cloudrun_internallb = gcp.cloudrunv2.Service("cloudrun-with-ilb",
             )]
         )],
         vpc_access=gcp.cloudrunv2.ServiceTemplateVpcAccessArgs(
-            connector=connector_with_pga.id,
+            connector=vpc_connector.id,
             egress="PRIVATE_RANGES_ONLY",
         ),
         scaling=gcp.cloudrunv2.ServiceTemplateScalingArgs(
@@ -276,4 +285,5 @@ service_iam_member_3 = gcp.cloudrunv2.ServiceIamMember("service-iam-member_3",
 #     network=cloudrun_network_with_clouddns.id,
 #     private_ip_google_access=False)
 
-pulumi.export("cloud run url", pulumi.Output.format(external_cloudrun_1.uri))
+pulumi.export("Ennable PGA", pulumi.Output.format(service_use_pga.uri))
+pulumi.export("Use Internal Load Balancer", pulumi.Output.format(external_cloudrun_internallb.uri))
