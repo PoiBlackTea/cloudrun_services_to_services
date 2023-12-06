@@ -225,7 +225,7 @@ forwarding_rule = gcp.compute.ForwardingRule(
 )
 
 
-# create cloud run service with pga
+# create cloud run service to service connect with internal load balancer
 external_cloudrun_internallb = gcp.cloudrunv2.Service("cloudrun-with-ilb",
     location=gcp_region,
     ingress="INGRESS_TRAFFIC_ALL",
@@ -271,34 +271,120 @@ service_iam_member_3 = gcp.cloudrunv2.ServiceIamMember("service-iam-member_3",
 
 # Case 3
 # Publish the service via Private Service Connect
-# psc_published_service = gcp.compute.ServiceAttachment("private-service-connect",
-#     project=gcp_project,
-#     region=gcp_region,
-#     connection_preference="ACCEPT_AUTOMATIC",
-#     name_suffix="psc",
-#     nat_subnets=[subnetwork.id],
-#     target_service=[forwarding_rule.uri],
-#     enable_proxy_protocol=True,
-#     consumer_accept_lists=[gcp.compute.ServiceAttachmentConsumerAcceptListArgs(
-#         project_id_or_number=gcp_project,
-#         connection_limit=5,
-#     )],
-#     connect_mode="PRIVATE_SERVICE_CONNECT"
-# )
+# create custom PRIVATE_SERVICE_CONNECT subnet
+psc_subnetwork = gcp.compute.Subnetwork("psc-subnet",
+    ip_cidr_range="10.10.10.0/24",
+    region=gcp_region,
+    network=internal_network.id,
+    purpose="PRIVATE_SERVICE_CONNECT"
+)
 
 
-# create custom vpc with cloud dns
-# cloudrun_network_with_clouddns = gcp.compute.Network("cloudrun-vpc3",
-#     auto_create_subnetworks=False,
-#     description="cloudrun vpc with dns",
-#     mtu=1500)
+# create consumer vpc
+consumer_network= gcp.compute.Network("consumer-vpc",
+    auto_create_subnetworks=False,
+    description="consumer vpc",
+    mtu=1500
+)
 
-# # create custom vpc subnet with cloud dns
-# cloudrun_subnetwork_with_clouddns = gcp.compute.Subnetwork("cloudrun-demo-subnet3",
-#     ip_cidr_range="10.0.3.0/24",
-#     region=gcp_region,
-#     network=cloudrun_network_with_clouddns.id,
-#     private_ip_google_access=False)
+
+# create consumer subnet
+consumer_subnetwork = gcp.compute.Subnetwork("consumer-subnet",
+    ip_cidr_range="10.0.2.0/24",
+    region=gcp_region,
+    network=consumer_network.id
+)
+
+
+psc_published_service = gcp.compute.ServiceAttachment("private-service-connect",
+    project=gcp_project,
+    region=gcp_region,
+    connection_preference="ACCEPT_MANUAL",
+    nat_subnets=[psc_subnetwork.name],
+    target_service=forwarding_rule.name,
+    enable_proxy_protocol=False,
+    consumer_accept_lists=[gcp.compute.ServiceAttachmentConsumerAcceptListArgs(
+        project_id_or_num=gcp_project,
+        connection_limit=5,
+    )],
+    reconcile_connections=True,
+    opts=pulumi.ResourceOptions(depends_on=[psc_subnetwork])
+)
+
+
+# create vpc access connector in consumer
+consumer_connector = gcp.vpcaccess.Connector("cs-connector",
+    ip_cidr_range="10.2.0.0/28",
+    network=consumer_network.id,
+    opts=pulumi.ResourceOptions(
+        depends_on=[consumer_network]
+    )
+)
+
+# create psc endpoint ip
+endpoint_addr = gcp.compute.Address(
+    "endpoint-addr", 
+    region=gcp_region,
+    subnetwork=consumer_subnetwork.id,
+    address_type="INTERNAL"
+)
+
+
+# Lastly, create a global Forwarding Rule
+psc_forwarding_rule = gcp.compute.ForwardingRule(
+    'psc-forwardingrule',
+    target=psc_published_service.self_link,
+    load_balancing_scheme="",
+    recreate_closed_psc=True,
+    ip_address=endpoint_addr.self_link,
+    network=consumer_network,
+    subnetwork=consumer_subnetwork
+)
+
+
+# create cloud run service to service connect with psc
+external_cloudrun_psc = gcp.cloudrunv2.Service("cloudrun-with-psc",
+    location=gcp_region,
+    ingress="INGRESS_TRAFFIC_ALL",
+    template=gcp.cloudrunv2.ServiceTemplateArgs(
+        containers=[gcp.cloudrunv2.ServiceTemplateContainerArgs(
+            image=image_name,
+            envs=[
+                gcp.cloudrunv2.ServiceTemplateContainerEnvArgs(
+                    name="endpoint",
+                    value=endpoint_addr.address.apply(lambda address: "http://" + address),
+                )
+            ],
+            ports=[gcp.cloudrunv2.ServiceTemplateContainerPortArgs(
+                container_port=80
+            )]
+        )],
+        vpc_access=gcp.cloudrunv2.ServiceTemplateVpcAccessArgs(
+            connector=consumer_connector.id,
+            egress="PRIVATE_RANGES_ONLY",
+        ),
+        scaling=gcp.cloudrunv2.ServiceTemplateScalingArgs(
+                max_instance_count=1,
+                min_instance_count=0
+        ),
+        service_account=service_account.email,
+        execution_environment="EXECUTION_ENVIRONMENT_GEN2",
+        timeout="3600s",
+        session_affinity=True,
+    ),
+    traffics=[gcp.cloudrunv2.ServiceTrafficArgs(
+        type="TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST",
+        percent=100,
+    )],
+    opts=pulumi.ResourceOptions(depends_on=[consumer_connector])
+)
+
+service_iam_member_4 = gcp.cloudrunv2.ServiceIamMember("service-iam-member_4",
+    name=external_cloudrun_psc.id,
+    role="roles/run.invoker",
+    member="allUsers"
+)
 
 pulumi.export("Ennable PGA", pulumi.Output.format(service_use_pga.uri))
 pulumi.export("Use Internal Load Balancer", pulumi.Output.format(external_cloudrun_internallb.uri))
+pulumi.export("Use PSC", pulumi.Output.format(external_cloudrun_psc.uri))
