@@ -23,7 +23,7 @@ repo = gcp.artifactregistry.Repository(
     "my-repo",
     description="example Docker repository",
     docker_config=gcp.artifactregistry.RepositoryDockerConfigArgs(
-        immutable_tags=True,
+        immutable_tags=False,
     ),
     format="DOCKER",
     location=gcp_region,
@@ -33,9 +33,7 @@ repo = gcp.artifactregistry.Repository(
 cloudrun_image = docker.Image("cloudrun-image",
     image_name=image_name,
     build=docker.DockerBuildArgs(
-        args={
-            "platform": "linux/amd64",
-        },
+        platform="linux/amd64",
         context="upstream_cloudrun/",
         dockerfile="upstream_cloudrun/Dockerfile",
     ),
@@ -142,7 +140,7 @@ service_use_pga = gcp.cloudrunv2.Service(
         type="TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST",
         percent=100,
     )],
-    opts=pulumi.ResourceOptions(depends_on=[])
+    opts=pulumi.ResourceOptions(depends_on=[vpc_connector])
 )
 
 
@@ -261,7 +259,7 @@ external_cloudrun_internallb = gcp.cloudrunv2.Service("cloudrun-with-ilb",
         type="TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST",
         percent=100,
     )],
-    opts=pulumi.ResourceOptions(depends_on=[])
+    opts=pulumi.ResourceOptions(depends_on=[vpc_connector])
 )
 
 service_iam_member_3 = gcp.cloudrunv2.ServiceIamMember("service-iam-member_3",
@@ -270,6 +268,23 @@ service_iam_member_3 = gcp.cloudrunv2.ServiceIamMember("service-iam-member_3",
     member="allUsers"
 )
 
+
+# Case 3
+# Publish the service via Private Service Connect
+# psc_published_service = gcp.compute.ServiceAttachment("private-service-connect",
+#     project=gcp_project,
+#     region=gcp_region,
+#     connection_preference="ACCEPT_AUTOMATIC",
+#     name_suffix="psc",
+#     nat_subnets=[subnetwork.id],
+#     target_service=[forwarding_rule.uri],
+#     enable_proxy_protocol=True,
+#     consumer_accept_lists=[gcp.compute.ServiceAttachmentConsumerAcceptListArgs(
+#         project_id_or_number=gcp_project,
+#         connection_limit=5,
+#     )],
+#     connect_mode="PRIVATE_SERVICE_CONNECT"
+# )
 
 
 # create custom vpc with cloud dns
